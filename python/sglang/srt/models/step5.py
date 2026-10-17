@@ -76,7 +76,6 @@ from sglang.srt.layers.moe.utils import (
     RoutingMethodType,
     get_moe_a2a_backend,
     get_moe_runner_backend,
-    reduce_moe_output,
 )
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
@@ -1370,10 +1369,9 @@ class Step5DecoderLayer(nn.Module):
                 if deferred is not None:
                     return deferred
             combined = routed + shared
-        # The routed and shared experts return BF16 TP partials. The sum moves to
-        # the next layer only when the exit scope says so (fuse_mlp_allreduce);
-        # otherwise, as under LoRA or in a terminal layer, it is owed here.
-        return reduce_moe_output(combined)
+        # Stage boundaries complete or carry the routed + shared TP sum,
+        # including under LoRA and at the terminal layer. Return partials here.
+        return combined
 
     def forward(
         self,

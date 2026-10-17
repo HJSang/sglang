@@ -49,7 +49,7 @@ class TestStep5MlpReduction(CustomTestCase):
         )
 
 
-def _moe_ffn_output(*, sum_moves_to_next_layer: bool) -> torch.Tensor:
+def _moe_ffn_output(*, tp_size: int, sum_moves_to_next_layer: bool) -> torch.Tensor:
     layer = step5.Step5DecoderLayer.__new__(step5.Step5DecoderLayer)
     torch.nn.Module.__init__(layer)
     layer.use_moe = True
@@ -58,7 +58,7 @@ def _moe_ffn_output(*, sum_moves_to_next_layer: bool) -> torch.Tensor:
     layer.moe = MagicMock(return_value=(shared, routed), use_mega_moe=False)
     with (
         patch.object(
-            moe_utils, "get_parallel", return_value=SimpleNamespace(tp_size=2)
+            moe_utils, "get_parallel", return_value=SimpleNamespace(tp_size=tp_size)
         ),
         patch.object(
             moe_utils,
@@ -67,7 +67,7 @@ def _moe_ffn_output(*, sum_moves_to_next_layer: bool) -> torch.Tensor:
         ),
         patch(
             "sglang.srt.distributed.communication_op.tensor_model_parallel_all_reduce",
-            lambda x: 2 * x,
+            lambda x: tp_size * x,
         ),
     ):
         return layer._forward_ffn(
@@ -77,16 +77,16 @@ def _moe_ffn_output(*, sum_moves_to_next_layer: bool) -> torch.Tensor:
 
 
 class TestStep5MoeReduction(CustomTestCase):
-    def test_partial_moves_to_the_next_layer_when_the_exit_defers_it(self):
-        torch.testing.assert_close(
-            _moe_ffn_output(sum_moves_to_next_layer=True), torch.full((2, 4), 3.0)
-        )
-
-    def test_the_moe_layer_sums_its_partial_otherwise(self):
-        # e.g. under LoRA, where no fused consumer takes the deferred sum
-        torch.testing.assert_close(
-            _moe_ffn_output(sum_moves_to_next_layer=False), torch.full((2, 4), 6.0)
-        )
+    def test_stage_boundary_owns_the_moe_sum_for_every_tp_size(self):
+        # A producer always returns partials, whether the boundary completes
+        # the sum now (LoRA/terminal layer) or carries it to the next input.
+        for tp_size in (1, 2, 4, 8):
+            for defer in (False, True):
+                with self.subTest(tp_size=tp_size, defer=defer):
+                    torch.testing.assert_close(
+                        _moe_ffn_output(tp_size=tp_size, sum_moves_to_next_layer=defer),
+                        torch.full((2, 4), 3.0),
+                    )
 
 
 if __name__ == "__main__":
